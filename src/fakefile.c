@@ -5,12 +5,101 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <stdarg.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <netdb.h>
+#include <linux/limits.h>
+#include "message.h"
+
+volatile int fakesd = -1;
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 __attribute__((__constructor__,__used__)) static void lib_init();
 static void lib_init()
 {
 }
+
+static struct sockaddr *addr(void) {
+  static struct sockaddr_in addr = { 0, 0, { 0 } };
+  if (!addr.sin_port) {
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(26579);
+  }
+  return (struct sockaddr *) &addr;
+}
+
+void connectFake() {
+  if (fakesd > 0)
+    return;
+
+  fprintf(stderr, "Connect Fake SD : %d\n", fakesd);
+  fakesd = socket(PF_INET, SOCK_STREAM, 0);
+  if (fakesd < 0)
+    exit(0);
+
+  if (fcntl(fakesd, F_SETFD, FD_CLOEXEC) < 0)
+    exit(0);
+
+  while (1) {
+    if (connect(fakesd, addr(), sizeof(struct sockaddr_in)) < 0) {
+      if (errno != EINTR)
+        exit(0);
+    } else
+      break;
+  }
+  fprintf(stderr, "Connect Fake Finish\n");
+}
+
+void sendMsg(FILE_MSG *msg) {
+  unsigned char *ptr = (unsigned char *) msg;
+  ssize_t rc = 0, remaining = 0, total = sizeof(FILE_MSG);
+
+  pthread_mutex_lock(&mutex);
+  connectFake();
+ 
+  remaining = sizeof(FILE_MSG);
+  while (remaining > 0) {
+    rc = write(fakesd, ptr + (total - remaining), remaining);
+    fprintf(stderr, "Write Fake : %d %d\n", (int) rc, (int) total);
+    if (rc <= 0) {
+      if (remaining == total) break;
+      else exit(0);
+    } else {
+      remaining -= rc;
+    }
+  }
   
+  pthread_mutex_unlock(&mutex);
+}
+
+void sendStat(struct stat *st, int func, const char *path) {
+  FILE_MSG msg;
+
+  bzero(&msg, sizeof(FILE_MSG));
+
+  msg.type  = func;
+  msg.mode  = st->st_mode;
+  msg.ino   = st->st_ino;
+  msg.uid   = st->st_uid;
+  msg.gid   = st->st_gid;
+  msg.dev   = st->st_dev;
+  msg.rdev  = st->st_rdev;
+  msg.nlink = st->st_nlink;
+  strncpy(msg.file, path, PATH_MAX);
+
+  sendMsg(&msg);
+}
+
 typedef int (*orig_open)(const char *pathname, int flags);
 
 int open(const char *pathname, int flags, ...)
@@ -30,12 +119,12 @@ char *get_current_dir_name(void)
   return dir_func();
 }
 
-typedef int (*orig__xstat)(int ver, const char *path, struct stat *buf);
+typedef int (*__XSTAT)(int ver, const char *path, struct stat *buf);
 int __xstat(int ver, const char *path, struct stat *buf)
 {
-  orig__xstat xstat_func;
+  __XSTAT xstat_func;
 
-  xstat_func = (orig__xstat) dlsym(RTLD_NEXT,"__xstat");
+  xstat_func = (__XSTAT) dlsym(RTLD_NEXT,"__xstat");
   return xstat_func(ver, path, buf);
 }
 
@@ -125,11 +214,23 @@ int mknodat(int dirfd, const char *path, mode_t mode, dev_t dev)
   return mknod_func(dirfd, path, mode, dev);
 }
 
+typedef int (*STAT)(const char *path, struct stat *buf);
+
+void *get_libc() {
+  void *lib = 0;
+  if (!lib) {
+    lib = dlopen("/lib/x86_64-linux-gnu/libc.so.6", RTLD_LAZY);
+    fprintf(stderr, "dlopen : %p\n", lib);
+  }
+  return lib;
+}
+
 // typedef int (*XMKNOD)(int ver, const char *path, mode_t mode, dev_t *dev);
 int __xmknod(int ver, const char *path, mode_t mode, dev_t *dev)
 {
-//  XMKNOD mknod_func;
-  int fd = -1;
+  struct stat st;
+  int fd = -1, r;
+  mode_t old_mask = umask(022);
   fprintf(stderr, "__xmknod start\n");
   fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 00644);
   if (fd == -1)
@@ -137,8 +238,15 @@ int __xmknod(int ver, const char *path, mode_t mode, dev_t *dev)
 
   close(fd);
 
-  // mknod_func = (XMKNOD) dlsym(RTLD_NEXT, "__xmknod");
-  // return mknod_func(ver, path, mode, dev);
+  __XSTAT stat_func = (__XSTAT) dlsym(RTLD_NEXT, "__xstat");
+  r = stat_func(ver, path, &st);
+  if (r)
+    return -1;
+
+  st.st_mode = mode & ~old_mask;
+  st.st_rdev = *dev;
+
+  sendStat(&st, FUNC_MKNOD, "");
 
   return 0;
 }
@@ -185,7 +293,8 @@ int symlink(const char *path1, const char *path2) {
   symlinkFunc = (SYMLINK) dlsym(RTLD_NEXT, "symlink");
   return symlinkFunc(path1, path2);
 #endif
-  int fd = -1;
+  struct stat st;
+  int fd = -1, r = 0;
 
   fprintf(stderr, "symlink start : %s\n", path2); 
 
@@ -193,6 +302,14 @@ int symlink(const char *path1, const char *path2) {
   if (fd == -1)
     return -1;
   close(fd);
+
+  __XSTAT stat_func = (__XSTAT) dlsym(RTLD_NEXT, "__xstat");
+  r = stat_func(0, path2, &st);
+  if (r)
+    return -1;
+
+  st.st_mode = (st.st_mode & ~S_IFMT) | S_IFLNK;
+  sendStat(&st, FUNC_SYMLINK, path1);
 
   return 0;
 }
