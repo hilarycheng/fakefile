@@ -3,6 +3,7 @@
 #define FUNC_MKNOD   2
 #define FUNC_UNLINK  3
 #define FUNC_SYMLINK 4
+#define FUNC_STAT    5
 
 typedef struct {
   int type;

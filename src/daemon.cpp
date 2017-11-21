@@ -52,7 +52,40 @@ void socketListRemove(int index) {
 
   mSocketSize--;
 }
-  
+
+void queryFile(int sd, FILE_MSG *msg) {
+  static sqlite3_stmt *select = NULL;
+  int rc = 0;
+  const char *sql = "SELECT * FROM file WHERE path = ?;";
+
+  if (!select) {
+    rc = sqlite3_prepare_v2(mem_db, sql, strlen(sql), &select, NULL);
+    if (rc) 
+      return;
+  }
+
+  rc = sqlite3_bind_text(select, 1, msg->file, -1, SQLITE_STATIC);
+  rc = sqlite3_step(select);
+  fprintf(stderr, "bind select : %s %d %d\n", msg->file, rc, SQLITE_ROW);
+  if (rc == SQLITE_ROW) {
+    if (sqlite3_column_text(select, 2) != NULL) {
+      strncpy(msg->link, (char *) sqlite3_column_text(select, 2), PATH_MAX);
+    }
+    msg->dev  = sqlite3_column_int(select, 3);
+    msg->ino  = (unsigned long) sqlite3_column_int64(select, 4);
+    msg->uid  = sqlite3_column_int(select, 5);
+    msg->gid  = sqlite3_column_int(select, 6);
+    msg->mode = sqlite3_column_int(select, 7);
+    msg->rdev = sqlite3_column_int(select, 8);
+  } else {
+    msg->type |= 0x8000;
+  }
+
+  write(sd, msg, sizeof(FILE_MSG));
+  sqlite3_reset(select);
+  sqlite3_clear_bindings(select);
+}
+
 void insertFile(FILE_MSG *msg) {
   int rc = 0;
   static sqlite3_stmt *insert = NULL;
@@ -103,7 +136,11 @@ int readMsg(int sd, FILE_MSG *msg) {
   printf("Read Msg : %d %d : %d\n", (int) len, (int) msg->ino, (int) sizeof(FILE_MSG));
   printf("Read Msg : %s\n", msg->file);
 
-  insertFile(msg);
+  if (msg->type != FUNC_CHOWN && msg->type != FUNC_STAT) {
+    insertFile(msg);
+  } else if (msg->type == FUNC_STAT) {
+    queryFile(sd, msg);
+  }
 
   return 0;
 }
@@ -204,6 +241,7 @@ int init_db(void) {
   }
   sqlite3_free_table(results);
 
+  fprintf(stderr, "Found Tables : %d\n", found);
   if (found == 0) {
     const char *create_file = "create table file ( id INTEGER PRIMARY KEY, path VARCHAR, link VARCHAR, "
       "dev INTEGER, ino INTEGER, uid INTEGER, gid INTEGER, mode INTEGER, rdev INTEGER, deleted INTEGER "

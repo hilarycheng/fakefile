@@ -33,7 +33,7 @@ static struct sockaddr *addr(void) {
   if (!addr.sin_port) {
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(32013);
+    addr.sin_port = htons(30132);
   }
   return (struct sockaddr *) &addr;
 }
@@ -82,8 +82,9 @@ void sendMsg(FILE_MSG *msg) {
   pthread_mutex_unlock(&mutex);
 }
 
-void sendStat(struct stat *st, int func, const char *path, const char *link) {
+int sendStat(struct stat *st, int func, const char *path, const char *link) {
   FILE_MSG msg;
+  int rc = 0;
 
   bzero(&msg, sizeof(FILE_MSG));
 
@@ -99,6 +100,26 @@ void sendStat(struct stat *st, int func, const char *path, const char *link) {
   strncpy(msg.link, link, PATH_MAX);
 
   sendMsg(&msg);
+
+  if (func == FUNC_STAT) {
+    rc = read(fakesd, &msg, sizeof(FILE_MSG));
+    fprintf(stderr, "READ : %d %d\n", (int) rc, (int) sizeof(FILE_MSG));
+    if (rc == sizeof(FILE_MSG)) {
+      fprintf(stderr, "READ type : %04X\n", (unsigned int) msg.type);
+      if ((msg.type & 0x8000) != 0)
+        return 1;
+      st->st_mode  = msg.mode;
+      st->st_ino   = msg.mode;
+      st->st_uid   = msg.mode;
+      st->st_gid   = msg.mode;
+      st->st_dev   = msg.mode;
+      st->st_rdev  = msg.mode;
+      st->st_nlink = msg.mode;
+      return 0;
+    }
+  }
+
+  return 0;
 }
 
 typedef int (*orig_open)(const char *pathname, int flags);
@@ -125,6 +146,7 @@ int __xstat(int ver, const char *path, struct stat *buf)
 {
   __XSTAT xstat_func;
 
+  fprintf(stderr, "__xstat\n");
   xstat_func = (__XSTAT) dlsym(RTLD_NEXT,"__xstat");
   return xstat_func(ver, path, buf);
 }
@@ -132,10 +154,17 @@ int __xstat(int ver, const char *path, struct stat *buf)
 typedef int (*orig__lxstat)(int ver, const char *path, struct stat *buf);
 int __lxstat(int ver, const char *path, struct stat *buf)
 {
+  struct stat st;
   orig__lxstat xstat_func;
 
-  xstat_func = (orig__lxstat) dlsym(RTLD_NEXT,"__lxstat");
-  return xstat_func(ver, path, buf);
+  fprintf(stderr, "__lxstat\n");
+
+  if (sendStat(buf, FUNC_STAT, path, "") != 0) {
+    xstat_func = (orig__lxstat) dlsym(RTLD_NEXT,"__lxstat");
+    return xstat_func(ver, path, buf);
+  }
+
+  return 0;
 }
 
 typedef int (*orig__fxstat)(int ver, int fd, struct stat *buf);
@@ -143,6 +172,7 @@ int __fxstat(int ver, int fd, struct stat *buf)
 {
   orig__fxstat fxstat_func;
 
+  fprintf(stderr, "__fxstat\n");
   fxstat_func = (orig__fxstat) dlsym(RTLD_NEXT,"__fxstat");
   return fxstat_func(ver, fd, buf);
 }
@@ -156,11 +186,22 @@ int fchown(int fd, uid_t owner, gid_t group) {
 typedef int (*LCHOWN)(const char *path, uid_t owner, gid_t group);
 int lchown(const char *path, uid_t owner, gid_t group)
 {
-  LCHOWN lchown_func;
+  int r = 0;
+  struct stat st;
+  // LCHOWN lchown_func;
 
   fprintf(stderr, "lchown start\n");
-  lchown_func = (LCHOWN) dlsym(RTLD_NEXT, "lchown");
-  // return lchown_func(path, owner, group);
+  // lchown_func = (LCHOWN) dlsym(RTLD_NEXT, "lchown");
+
+  __XSTAT stat_func = (__XSTAT) dlsym(RTLD_NEXT, "__xstat");
+  r  = stat_func(0, path, &st);
+  if (r)
+    return -1;
+
+  st.st_uid = owner;
+  st.st_gid = group;
+  sendStat(&st, FUNC_CHOWN, path, "");
+
   return 0;
 }
 
