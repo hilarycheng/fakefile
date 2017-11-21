@@ -54,3 +54,6 @@ dkms.conf
 *swp
 fakedaemon
 fakesys.so
+
+*db
+dev

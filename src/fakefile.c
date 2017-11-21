@@ -33,7 +33,7 @@ static struct sockaddr *addr(void) {
   if (!addr.sin_port) {
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(26579);
+    addr.sin_port = htons(32013);
   }
   return (struct sockaddr *) &addr;
 }
@@ -82,7 +82,7 @@ void sendMsg(FILE_MSG *msg) {
   pthread_mutex_unlock(&mutex);
 }
 
-void sendStat(struct stat *st, int func, const char *path) {
+void sendStat(struct stat *st, int func, const char *path, const char *link) {
   FILE_MSG msg;
 
   bzero(&msg, sizeof(FILE_MSG));
@@ -96,6 +96,7 @@ void sendStat(struct stat *st, int func, const char *path) {
   msg.rdev  = st->st_rdev;
   msg.nlink = st->st_nlink;
   strncpy(msg.file, path, PATH_MAX);
+  strncpy(msg.link, link, PATH_MAX);
 
   sendMsg(&msg);
 }
@@ -246,7 +247,7 @@ int __xmknod(int ver, const char *path, mode_t mode, dev_t *dev)
   st.st_mode = mode & ~old_mask;
   st.st_rdev = *dev;
 
-  sendStat(&st, FUNC_MKNOD, "");
+  sendStat(&st, FUNC_MKNOD, path, "");
 
   return 0;
 }
@@ -309,7 +310,7 @@ int symlink(const char *path1, const char *path2) {
     return -1;
 
   st.st_mode = (st.st_mode & ~S_IFMT) | S_IFLNK;
-  sendStat(&st, FUNC_SYMLINK, path1);
+  sendStat(&st, FUNC_SYMLINK, path2, path1);
 
   return 0;
 }

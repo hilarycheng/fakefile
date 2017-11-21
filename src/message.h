@@ -14,5 +14,6 @@ typedef struct {
   uint32_t mode;
   uint32_t nlink;
   char file[PATH_MAX];
+  char link[PATH_MAX];
 } FILE_MSG;
 
