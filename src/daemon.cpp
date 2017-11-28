@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <sqlite3.h>
 #include <string.h>
+#include <time.h>
 #include "message.h"
 
 int mSocket = -1;
@@ -66,7 +67,7 @@ void queryFile(int sd, FILE_MSG *msg) {
 
   rc = sqlite3_bind_text(select, 1, msg->file, -1, SQLITE_STATIC);
   rc = sqlite3_step(select);
-  fprintf(stderr, "bind select : %s %d %d\n", msg->file, rc, SQLITE_ROW);
+
   if (rc == SQLITE_ROW) {
     if (sqlite3_column_text(select, 2) != NULL) {
       strncpy(msg->link, (char *) sqlite3_column_text(select, 2), PATH_MAX);
@@ -86,6 +87,32 @@ void queryFile(int sd, FILE_MSG *msg) {
   sqlite3_clear_bindings(select);
 }
 
+void updateFile(FILE_MSG *msg) {
+  int rc = 0;
+  static sqlite3_stmt *update = NULL;
+  const char *sql = "UPDATE file SET link = ?, dev = ?, ino = ?, uid = ?, gid = ?, mode = ?, rdev = ? WHERE path = ?";
+
+  if (!update) {
+    rc = sqlite3_prepare_v2(mem_db, sql, strlen(sql), &update, NULL);
+    if (rc) {
+      return; 
+    }
+  }
+
+  sqlite3_bind_text(update, 1, msg->link, -1, SQLITE_STATIC);
+  sqlite3_bind_int(update, 2, msg->dev);
+  sqlite3_bind_int64(update, 3, msg->ino);
+  sqlite3_bind_int(update, 4, msg->uid);
+  sqlite3_bind_int(update, 5, msg->gid);
+  sqlite3_bind_int(update, 6, msg->mode);
+  sqlite3_bind_int(update, 7, msg->rdev);
+  sqlite3_bind_text(update, 8, msg->file, -1, SQLITE_STATIC);
+
+  sqlite3_step(update);
+  sqlite3_reset(update);
+  sqlite3_clear_bindings(update);
+}
+
 void insertFile(FILE_MSG *msg) {
   int rc = 0;
   static sqlite3_stmt *insert = NULL;
@@ -93,7 +120,6 @@ void insertFile(FILE_MSG *msg) {
     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0);";
 
 
-  fprintf(stderr, "insert file : %p\n", insert);
   if (!insert) {
     rc = sqlite3_prepare_v2(mem_db, sql, strlen(sql), &insert, NULL);
     if (rc) {
@@ -108,8 +134,8 @@ void insertFile(FILE_MSG *msg) {
   sqlite3_bind_int64(insert, 4, msg->ino);
   sqlite3_bind_int(insert, 5, msg->uid);
   sqlite3_bind_int(insert, 6, msg->gid);
-  sqlite3_bind_int(insert, 6, msg->mode);
-  sqlite3_bind_int(insert, 6, msg->rdev);
+  sqlite3_bind_int(insert, 7, msg->mode);
+  sqlite3_bind_int(insert, 8, msg->rdev);
 
   sqlite3_step(insert);
   sqlite3_reset(insert);
@@ -128,18 +154,19 @@ int readMsg(int sd, FILE_MSG *msg) {
     if (len == 0)
       return -1;
 
-    if (errno = EINTR)
+    if (errno == EINTR)
       continue;
 
     exit(0);
   }
-  printf("Read Msg : %d %d : %d\n", (int) len, (int) msg->ino, (int) sizeof(FILE_MSG));
-  printf("Read Msg : %s\n", msg->file);
 
-  if (msg->type != FUNC_CHOWN && msg->type != FUNC_STAT) {
+  if (msg->type != FUNC_CHOWN && msg->type != FUNC_STAT && msg->type != FUNC_CHMOD) {
+    printf("Msg Type : %d %d\n", msg->type, FUNC_SYMLINK);
     insertFile(msg);
   } else if (msg->type == FUNC_STAT) {
     queryFile(sd, msg);
+  } else if (msg->type == FUNC_CHOWN || msg->type == FUNC_CHMOD) {
+    updateFile(msg);
   }
 
   return 0;

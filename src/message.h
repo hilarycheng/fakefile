@@ -4,6 +4,8 @@
 #define FUNC_UNLINK  3
 #define FUNC_SYMLINK 4
 #define FUNC_STAT    5
+#define FUNC_CHMOD   6
+#define FUNC_MKDIR   7
 
 typedef struct {
   int type;

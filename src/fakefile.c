@@ -18,6 +18,7 @@
 #include <netinet/tcp.h>
 #include <netdb.h>
 #include <linux/limits.h>
+#include <time.h>
 #include "message.h"
 
 volatile int fakesd = -1;
@@ -33,7 +34,7 @@ static struct sockaddr *addr(void) {
   if (!addr.sin_port) {
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(30132);
+    addr.sin_port = htons(2824);
   }
   return (struct sockaddr *) &addr;
 }
@@ -64,28 +65,26 @@ void sendMsg(FILE_MSG *msg) {
   unsigned char *ptr = (unsigned char *) msg;
   ssize_t rc = 0, remaining = 0, total = sizeof(FILE_MSG);
 
-  pthread_mutex_lock(&mutex);
   connectFake();
  
   remaining = sizeof(FILE_MSG);
   while (remaining > 0) {
     rc = write(fakesd, ptr + (total - remaining), remaining);
-    fprintf(stderr, "Write Fake : %d %d\n", (int) rc, (int) total);
+    // fprintf(stderr, "Write Fake : %d %d\n", (int) rc, (int) total);
     if (rc <= 0) {
       if (remaining == total) break;
-      else exit(0);
+       else exit(0);
     } else {
       remaining -= rc;
     }
   }
-  
-  pthread_mutex_unlock(&mutex);
 }
 
 int sendStat(struct stat *st, int func, const char *path, const char *link) {
   FILE_MSG msg;
   int rc = 0;
 
+  pthread_mutex_lock(&mutex);
   bzero(&msg, sizeof(FILE_MSG));
 
   msg.type  = func;
@@ -103,22 +102,27 @@ int sendStat(struct stat *st, int func, const char *path, const char *link) {
 
   if (func == FUNC_STAT) {
     rc = read(fakesd, &msg, sizeof(FILE_MSG));
-    fprintf(stderr, "READ : %d %d\n", (int) rc, (int) sizeof(FILE_MSG));
+    // fprintf(stderr, "READ : %d %d\n", (int) rc, (int) sizeof(FILE_MSG));
     if (rc == sizeof(FILE_MSG)) {
-      fprintf(stderr, "READ type : %04X\n", (unsigned int) msg.type);
-      if ((msg.type & 0x8000) != 0)
+      // fprintf(stderr, "READ type : %04X\n", (unsigned int) msg.type);
+      if ((msg.type & 0x8000) != 0) {
+        pthread_mutex_unlock(&mutex);
         return 1;
+      }
+      // fprintf(stderr, "READ type success : %04X %d\n", (unsigned int) msg.type, (int) time(0));
       st->st_mode  = msg.mode;
-      st->st_ino   = msg.mode;
-      st->st_uid   = msg.mode;
-      st->st_gid   = msg.mode;
-      st->st_dev   = msg.mode;
-      st->st_rdev  = msg.mode;
-      st->st_nlink = msg.mode;
+      st->st_ino   = msg.ino;
+      st->st_uid   = msg.uid;
+      st->st_gid   = msg.gid;
+      st->st_dev   = msg.dev;
+      st->st_rdev  = msg.rdev;
+      st->st_nlink = msg.nlink;
+      pthread_mutex_unlock(&mutex);
       return 0;
     }
   }
 
+  pthread_mutex_unlock(&mutex);
   return 0;
 }
 
@@ -157,12 +161,13 @@ int __lxstat(int ver, const char *path, struct stat *buf)
   struct stat st;
   orig__lxstat xstat_func;
 
-  fprintf(stderr, "__lxstat\n");
+  fprintf(stderr, "__lxstat %s\n", path);
 
   if (sendStat(buf, FUNC_STAT, path, "") != 0) {
     xstat_func = (orig__lxstat) dlsym(RTLD_NEXT,"__lxstat");
     return xstat_func(ver, path, buf);
   }
+  fprintf(stderr, "__lxstat sucecss : %s\n", path);
 
   return 0;
 }
@@ -190,13 +195,18 @@ int lchown(const char *path, uid_t owner, gid_t group)
   struct stat st;
   // LCHOWN lchown_func;
 
-  fprintf(stderr, "lchown start\n");
+  fprintf(stderr, "lchown start %s\n", path);
   // lchown_func = (LCHOWN) dlsym(RTLD_NEXT, "lchown");
 
-  __XSTAT stat_func = (__XSTAT) dlsym(RTLD_NEXT, "__xstat");
-  r  = stat_func(0, path, &st);
-  if (r)
+  // __XSTAT stat_func = (__XSTAT) dlsym(RTLD_NEXT, "__xstat");
+  // r  = stat_func(0, path, &st);
+  // if (r)
+  // return -1;
+
+  if (sendStat(&st, FUNC_STAT, path, "") != 0) {
     return -1;
+  }
+
 
   st.st_uid = owner;
   st.st_gid = group;
@@ -322,7 +332,33 @@ int chown(const char *path, uid_t owner, gid_t group) {
 
 typedef int (*LINK)(const char *path1, const char *path2);
 int link(const char *path1, const char *path2) {
-  fprintf(stderr, "link start\n");
+#if 0
+  SYMLINK symlinkFunc;
+
+  fprintf(stderr, "symlink start\n"); 
+  symlinkFunc = (SYMLINK) dlsym(RTLD_NEXT, "symlink");
+  return symlinkFunc(path1, path2);
+#endif
+  struct stat st;
+  int fd = -1, r = 0;
+  mode_t old_mask = umask(022);
+
+  fprintf(stderr, "link start : %s\n", path2); 
+
+  fd = open(path2, O_WRONLY | O_CREAT | O_TRUNC, 00644);
+  if (fd == -1)
+    return -1;
+  close(fd);
+
+  __XSTAT stat_func = (__XSTAT) dlsym(RTLD_NEXT, "__xstat");
+  r = stat_func(0, path2, &st);
+  if (r)
+    return -1;
+
+  st.st_mode = ~old_mask;
+  st.st_mode = (st.st_mode & ~S_IFMT) | S_IFLNK;
+  sendStat(&st, FUNC_SYMLINK, path2, path1);
+
   return 0;
 }
 
@@ -337,6 +373,7 @@ int symlink(const char *path1, const char *path2) {
 #endif
   struct stat st;
   int fd = -1, r = 0;
+  mode_t old_mask = umask(022);
 
   fprintf(stderr, "symlink start : %s\n", path2); 
 
@@ -350,10 +387,57 @@ int symlink(const char *path1, const char *path2) {
   if (r)
     return -1;
 
+  st.st_mode = ~old_mask;
   st.st_mode = (st.st_mode & ~S_IFMT) | S_IFLNK;
   sendStat(&st, FUNC_SYMLINK, path2, path1);
 
   return 0;
+}
+
+typedef int (*CHMOD)(const char *path, mode_t mode);
+int chmod(const char *path, mode_t mode)
+{
+  struct stat st;
+
+  fprintf(stderr, "chmod path : %s\n", path);
+
+  if (sendStat(&st, FUNC_STAT, path, "") != 0) {
+    return -1;
+  }
+
+  st.st_mode = mode;
+  sendStat(&st, FUNC_CHMOD, path, "");
+
+  return 0;
+}
+
+typedef ssize_t (*READLINK)(const char *path, char *buf, size_t bufsiz);
+ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
+  fprintf(stderr, "readlink : %s\n", path);
+
+  READLINK rl_func = (READLINK) dlsym(RTLD_NEXT, "readlink");
+  
+  return rl_func(path, buf, bufsiz);
+}
+
+typedef int (*MKDIR)(const char *path, mode_t mode);
+int mkdir(const char *path, mode_t mode)
+{
+  int ret = 0;
+  fprintf(stderr, "mkdir path : %s\n", path);
+
+  MKDIR mkdir_func = (MKDIR) dlsym(RTLD_NEXT, "mkdir");
+  ret = mkdir_func(path, mode);
+  if (ret == 0) {
+    struct stat st;
+    __XSTAT stat_func = (__XSTAT) dlsym(RTLD_NEXT, "__xstat");
+    int r = stat_func(0, path, &st);
+    if (r)
+      return -1;
+    sendStat(&st, FUNC_MKDIR, path, "");
+  }
+
+  return ret;
 }
 
 int setuid(uid_t id)
