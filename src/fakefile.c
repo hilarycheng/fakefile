@@ -34,7 +34,7 @@ static struct sockaddr *addr(void) {
   if (!addr.sin_port) {
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(2824);
+    addr.sin_port = htons(24120);
   }
   return (struct sockaddr *) &addr;
 }
@@ -96,7 +96,7 @@ int sendStat(struct stat *st, int func, const char *path, const char *link) {
   msg.rdev  = st->st_rdev;
   msg.nlink = st->st_nlink;
   strncpy(msg.file, path, PATH_MAX);
-  strncpy(msg.link, link, PATH_MAX);
+  if (link != NULL) strncpy(msg.link, link, PATH_MAX);
 
   sendMsg(&msg);
 
@@ -117,6 +117,7 @@ int sendStat(struct stat *st, int func, const char *path, const char *link) {
       st->st_dev   = msg.dev;
       st->st_rdev  = msg.rdev;
       st->st_nlink = msg.nlink;
+      if (link != NULL) memcpy(link, msg.link, PATH_MAX);
       pthread_mutex_unlock(&mutex);
       return 0;
     }
@@ -148,25 +149,45 @@ char *get_current_dir_name(void)
 typedef int (*__XSTAT)(int ver, const char *path, struct stat *buf);
 int __xstat(int ver, const char *path, struct stat *buf)
 {
+  int r = 0;
   __XSTAT xstat_func;
+  struct stat st;
 
   fprintf(stderr, "__xstat\n");
   xstat_func = (__XSTAT) dlsym(RTLD_NEXT,"__xstat");
-  return xstat_func(ver, path, buf);
+  r = xstat_func(ver, path, buf);
+  if (r)
+    return -1;
+
+  memcpy(&st, buf, sizeof(struct stat));
+  if (sendStat(&st, FUNC_STAT, path, NULL) != 0) {
+    return 0;
+  }
+  memcpy(buf, &st, sizeof(struct stat));
+  fprintf(stderr, "__xstat sucecss : %s\n", path);
+
+  return 0;
 }
 
 typedef int (*orig__lxstat)(int ver, const char *path, struct stat *buf);
 int __lxstat(int ver, const char *path, struct stat *buf)
 {
+  int r = 0;
   struct stat st;
   orig__lxstat xstat_func;
 
   fprintf(stderr, "__lxstat %s\n", path);
+  xstat_func = (orig__lxstat) dlsym(RTLD_NEXT,"__lxstat");
+  r = xstat_func(ver, path, buf);
+  if (r)
+    return -1;
 
-  if (sendStat(buf, FUNC_STAT, path, "") != 0) {
-    xstat_func = (orig__lxstat) dlsym(RTLD_NEXT,"__lxstat");
-    return xstat_func(ver, path, buf);
+  memcpy(&st, buf, sizeof(struct stat));
+  if (sendStat(&st, FUNC_STAT, path, NULL) != 0) {
+    fprintf(stderr, "__lxstat not in db : %s\n", path);
+    return 0;
   }
+  memcpy(buf, &st, sizeof(struct stat));
   fprintf(stderr, "__lxstat sucecss : %s\n", path);
 
   return 0;
@@ -195,22 +216,22 @@ int lchown(const char *path, uid_t owner, gid_t group)
   struct stat st;
   // LCHOWN lchown_func;
 
-  fprintf(stderr, "lchown start %s\n", path);
+  // fprintf(stderr, "lchown start %s\n", path);
   // lchown_func = (LCHOWN) dlsym(RTLD_NEXT, "lchown");
 
-  // __XSTAT stat_func = (__XSTAT) dlsym(RTLD_NEXT, "__xstat");
-  // r  = stat_func(0, path, &st);
-  // if (r)
-  // return -1;
-
-  if (sendStat(&st, FUNC_STAT, path, "") != 0) {
+  __XSTAT stat_func = (__XSTAT) dlsym(RTLD_NEXT, "__xstat");
+  r  = stat_func(0, path, &st);
+  fprintf(stderr, "lchown start %s %d\n", path, r);
+  if (r)
     return -1;
-  }
 
+  if (sendStat(&st, FUNC_STAT, path, NULL) != 0) {
+    return 0;
+  }
 
   st.st_uid = owner;
   st.st_gid = group;
-  sendStat(&st, FUNC_CHOWN, path, "");
+  sendStat(&st, FUNC_CHOWN, path, NULL);
 
   return 0;
 }
@@ -298,7 +319,7 @@ int __xmknod(int ver, const char *path, mode_t mode, dev_t *dev)
   st.st_mode = mode & ~old_mask;
   st.st_rdev = *dev;
 
-  sendStat(&st, FUNC_MKNOD, path, "");
+  sendStat(&st, FUNC_MKNOD, path, NULL);
 
   return 0;
 }
@@ -397,27 +418,55 @@ int symlink(const char *path1, const char *path2) {
 typedef int (*CHMOD)(const char *path, mode_t mode);
 int chmod(const char *path, mode_t mode)
 {
+  int r = 0;
   struct stat st;
 
-  fprintf(stderr, "chmod path : %s\n", path);
+  __XSTAT stat_func = (__XSTAT) dlsym(RTLD_NEXT, "__xstat");
+  r  = stat_func(0, path, &st);
 
-  if (sendStat(&st, FUNC_STAT, path, "") != 0) {
+  fprintf(stderr, "chmod path : %s %d\n", path, r);
+  if (r)
     return -1;
+
+  if (sendStat(&st, FUNC_STAT, path, NULL) != 0) {
+    return 0;
   }
 
   st.st_mode = mode;
-  sendStat(&st, FUNC_CHMOD, path, "");
+  sendStat(&st, FUNC_CHMOD, path, NULL);
 
   return 0;
 }
 
 typedef ssize_t (*READLINK)(const char *path, char *buf, size_t bufsiz);
 ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
+  int r, len = 0;
+  __XSTAT xstat_func;
+  struct stat st;
+  char *templink = (char *) malloc(PATH_MAX);
+
   fprintf(stderr, "readlink : %s\n", path);
 
-  READLINK rl_func = (READLINK) dlsym(RTLD_NEXT, "readlink");
-  
-  return rl_func(path, buf, bufsiz);
+  xstat_func = (__XSTAT) dlsym(RTLD_NEXT,"__xstat");
+  r = xstat_func(0, path, &st);
+  if (r) {
+    free(templink);
+    return -1;
+  }
+
+  templink[0] = 0;
+  if (sendStat(&st, FUNC_STAT, path, templink) != 0) {
+    free(templink);
+    READLINK rl_func = (READLINK) dlsym(RTLD_NEXT, "readlink");
+    return rl_func(path, buf, bufsiz);
+  }
+
+  len = strnlen(templink, PATH_MAX);
+  fprintf(stderr, "readlink : %s : %d\n", templink, len);
+  strncpy(buf, templink, len);
+  free(templink);
+
+  return len;
 }
 
 typedef int (*MKDIR)(const char *path, mode_t mode);
@@ -434,7 +483,7 @@ int mkdir(const char *path, mode_t mode)
     int r = stat_func(0, path, &st);
     if (r)
       return -1;
-    sendStat(&st, FUNC_MKDIR, path, "");
+    sendStat(&st, FUNC_MKDIR, path, NULL);
   }
 
   return ret;

@@ -57,7 +57,7 @@ void socketListRemove(int index) {
 void queryFile(int sd, FILE_MSG *msg) {
   static sqlite3_stmt *select = NULL;
   int rc = 0;
-  const char *sql = "SELECT * FROM file WHERE path = ?;";
+  const char *sql = "SELECT * FROM file WHERE ino = ?;";
 
   if (!select) {
     rc = sqlite3_prepare_v2(mem_db, sql, strlen(sql), &select, NULL);
@@ -65,19 +65,23 @@ void queryFile(int sd, FILE_MSG *msg) {
       return;
   }
 
-  rc = sqlite3_bind_text(select, 1, msg->file, -1, SQLITE_STATIC);
+  rc = sqlite3_bind_int64(select, 1, msg->ino);
   rc = sqlite3_step(select);
 
+  printf("Query File : %s %d = %d\n", msg->file, rc, SQLITE_ROW);
   if (rc == SQLITE_ROW) {
     if (sqlite3_column_text(select, 2) != NULL) {
       strncpy(msg->link, (char *) sqlite3_column_text(select, 2), PATH_MAX);
     }
-    msg->dev  = sqlite3_column_int(select, 3);
-    msg->ino  = (unsigned long) sqlite3_column_int64(select, 4);
-    msg->uid  = sqlite3_column_int(select, 5);
-    msg->gid  = sqlite3_column_int(select, 6);
-    msg->mode = sqlite3_column_int(select, 7);
-    msg->rdev = sqlite3_column_int(select, 8);
+    msg->dev   = sqlite3_column_int(select, 3);
+    msg->ino   = (unsigned long) sqlite3_column_int64(select, 4);
+    msg->uid   = sqlite3_column_int(select, 5);
+    msg->gid   = sqlite3_column_int(select, 6);
+    msg->mode  = sqlite3_column_int(select, 7);
+    msg->rdev  = sqlite3_column_int(select, 8);
+    msg->nlink = sqlite3_column_int(select, 9);
+    printf("Query File : %s , Dev : %d, Ino : %d, uid : %d, gid : %d, mode : %d, rdev : %d, nlink : %d\n",
+        msg->file, msg->dev, msg->ino, msg->uid, msg->gid, msg->mode, msg->rdev , msg->nlink);
   } else {
     msg->type |= 0x8000;
   }
@@ -90,7 +94,7 @@ void queryFile(int sd, FILE_MSG *msg) {
 void updateFile(FILE_MSG *msg) {
   int rc = 0;
   static sqlite3_stmt *update = NULL;
-  const char *sql = "UPDATE file SET link = ?, dev = ?, ino = ?, uid = ?, gid = ?, mode = ?, rdev = ? WHERE path = ?";
+  const char *sql = "UPDATE file SET dev = ?, file = ?, uid = ?, gid = ?, mode = ?, rdev = ?, nlink = ? WHERE ino = ?";
 
   if (!update) {
     rc = sqlite3_prepare_v2(mem_db, sql, strlen(sql), &update, NULL);
@@ -99,14 +103,16 @@ void updateFile(FILE_MSG *msg) {
     }
   }
 
-  sqlite3_bind_text(update, 1, msg->link, -1, SQLITE_STATIC);
-  sqlite3_bind_int(update, 2, msg->dev);
-  sqlite3_bind_int64(update, 3, msg->ino);
-  sqlite3_bind_int(update, 4, msg->uid);
-  sqlite3_bind_int(update, 5, msg->gid);
-  sqlite3_bind_int(update, 6, msg->mode);
-  sqlite3_bind_int(update, 7, msg->rdev);
-  sqlite3_bind_text(update, 8, msg->file, -1, SQLITE_STATIC);
+  // sqlite3_bind_text(update, 1, msg->link, -1, SQLITE_STATIC);
+  sqlite3_bind_int(update, 1, msg->dev);
+  sqlite3_bind_text(update, 2, msg->file, -1, SQLITE_STATIC);
+  sqlite3_bind_int(update, 3, msg->uid);
+  sqlite3_bind_int(update, 4, msg->gid);
+  sqlite3_bind_int(update, 5, msg->mode);
+  sqlite3_bind_int(update, 6, msg->rdev);
+  sqlite3_bind_int(update, 7, msg->nlink);
+
+  sqlite3_bind_int64(update, 8, msg->ino);
 
   sqlite3_step(update);
   sqlite3_reset(update);
@@ -116,8 +122,8 @@ void updateFile(FILE_MSG *msg) {
 void insertFile(FILE_MSG *msg) {
   int rc = 0;
   static sqlite3_stmt *insert = NULL;
-  const char *sql = "INSERT INTO file (path, link, dev, ino, uid, gid, mode, rdev, deleted )"
-    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0);";
+  const char *sql = "INSERT INTO file (path, link, dev, ino, uid, gid, mode, rdev, nlink, deleted )"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0);";
 
 
   if (!insert) {
@@ -136,8 +142,10 @@ void insertFile(FILE_MSG *msg) {
   sqlite3_bind_int(insert, 6, msg->gid);
   sqlite3_bind_int(insert, 7, msg->mode);
   sqlite3_bind_int(insert, 8, msg->rdev);
+  sqlite3_bind_int(insert, 9, msg->nlink);
 
-  sqlite3_step(insert);
+  rc = sqlite3_step(insert);
+  fprintf(stderr, "insert sql : %d %s\n", rc, msg->file);
   sqlite3_reset(insert);
   sqlite3_clear_bindings(insert);
 
@@ -161,7 +169,7 @@ int readMsg(int sd, FILE_MSG *msg) {
   }
 
   if (msg->type != FUNC_CHOWN && msg->type != FUNC_STAT && msg->type != FUNC_CHMOD) {
-    printf("Msg Type : %d %d\n", msg->type, FUNC_SYMLINK);
+    printf("Insert Msg Type : %d %d\n", msg->type, FUNC_SYMLINK);
     insertFile(msg);
   } else if (msg->type == FUNC_STAT) {
     queryFile(sd, msg);
@@ -271,7 +279,8 @@ int init_db(void) {
   fprintf(stderr, "Found Tables : %d\n", found);
   if (found == 0) {
     const char *create_file = "create table file ( id INTEGER PRIMARY KEY, path VARCHAR, link VARCHAR, "
-      "dev INTEGER, ino INTEGER, uid INTEGER, gid INTEGER, mode INTEGER, rdev INTEGER, deleted INTEGER "
+      "dev INTEGER, ino INTEGER, uid INTEGER, gid INTEGER, mode INTEGER, rdev INTEGER, nlink INTEGER, "
+      " deleted INTEGER "
       ");";
     rc = sqlite3_exec(mem_db, create_file, NULL, NULL, &errmsg);
     if (rc) {
