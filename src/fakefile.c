@@ -34,7 +34,7 @@ static struct sockaddr *addr(void) {
   if (!addr.sin_port) {
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(24120);
+    addr.sin_port = htons(25663);
   }
   return (struct sockaddr *) &addr;
 }
@@ -209,6 +209,30 @@ int fchown(int fd, uid_t owner, gid_t group) {
   return 0;
 }
 
+typedef int (*CHOWN)(const char *path, uid_t owner, gid_t group);
+int chown(const char *path, uid_t owner, gid_t group)
+{
+  int r = 0;
+  struct stat st;
+  fprintf(stderr, "chown start\n");
+
+  __XSTAT stat_func = (__XSTAT) dlsym(RTLD_NEXT, "__xstat");
+  r  = stat_func(0, path, &st);
+  fprintf(stderr, "lchown start %s %d\n", path, r);
+  if (r)
+    return -1;
+
+  if (sendStat(&st, FUNC_STAT, path, NULL) != 0) {
+    return 0;
+  }
+
+  st.st_uid = owner;
+  st.st_gid = group;
+  sendStat(&st, FUNC_CHOWN, path, NULL);
+
+  return 0;
+}
+
 typedef int (*LCHOWN)(const char *path, uid_t owner, gid_t group);
 int lchown(const char *path, uid_t owner, gid_t group)
 {
@@ -345,12 +369,6 @@ int dup2(int oldfd, int newfd)
 }
 #endif
 
-typedef int (*CHOWN)(const char *path, uid_t owner, gid_t group);
-int chown(const char *path, uid_t owner, gid_t group) {
-  fprintf(stderr, "chown start\n");
-  return 0;
-}
-
 typedef int (*LINK)(const char *path1, const char *path2);
 int link(const char *path1, const char *path2) {
 #if 0
@@ -362,7 +380,7 @@ int link(const char *path1, const char *path2) {
 #endif
   struct stat st;
   int fd = -1, r = 0;
-  mode_t old_mask = umask(022);
+  mode_t old_mask = umask(0777);
 
   fprintf(stderr, "link start : %s\n", path2); 
 
@@ -376,8 +394,10 @@ int link(const char *path1, const char *path2) {
   if (r)
     return -1;
 
-  st.st_mode = ~old_mask;
-  st.st_mode = (st.st_mode & ~S_IFMT) | S_IFLNK;
+  st.st_mode = S_IRUSR | S_IWUSR | S_IXUSR |
+    S_IRGRP | S_IWGRP | S_IXGRP |
+    S_IROTH | S_IWOTH | S_IXOTH | S_IFLNK;
+  // st.st_mode = (st.st_mode & ~S_IFMT) | S_IFLNK;
   sendStat(&st, FUNC_SYMLINK, path2, path1);
 
   return 0;
@@ -394,7 +414,7 @@ int symlink(const char *path1, const char *path2) {
 #endif
   struct stat st;
   int fd = -1, r = 0;
-  mode_t old_mask = umask(022);
+  mode_t old_mask = umask(0777);
 
   fprintf(stderr, "symlink start : %s\n", path2); 
 
@@ -408,8 +428,11 @@ int symlink(const char *path1, const char *path2) {
   if (r)
     return -1;
 
-  st.st_mode = ~old_mask;
-  st.st_mode = (st.st_mode & ~S_IFMT) | S_IFLNK;
+  st.st_mode = S_IRUSR | S_IWUSR | S_IXUSR |
+    S_IRGRP | S_IWGRP | S_IXGRP |
+    S_IROTH | S_IWOTH | S_IXOTH | S_IFLNK;
+  // st.st_mode = ~old_mask;
+  // st.st_mode = (st.st_mode & ~S_IFMT) | S_IFLNK;
   sendStat(&st, FUNC_SYMLINK, path2, path1);
 
   return 0;
@@ -424,7 +447,6 @@ int chmod(const char *path, mode_t mode)
   __XSTAT stat_func = (__XSTAT) dlsym(RTLD_NEXT, "__xstat");
   r  = stat_func(0, path, &st);
 
-  fprintf(stderr, "chmod path : %s %d\n", path, r);
   if (r)
     return -1;
 
@@ -432,7 +454,8 @@ int chmod(const char *path, mode_t mode)
     return 0;
   }
 
-  st.st_mode = mode;
+  fprintf(stderr, "chmod path : %s %d %08o\n", path, r, mode);
+  st.st_mode = (st.st_mode & S_IFMT) | (mode & ~S_IFMT);
   sendStat(&st, FUNC_CHMOD, path, NULL);
 
   return 0;
