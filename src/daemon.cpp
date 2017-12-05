@@ -57,7 +57,7 @@ void socketListRemove(int index) {
 void queryFile(int sd, FILE_MSG *msg) {
   static sqlite3_stmt *select = NULL;
   int rc = 0;
-  const char *sql = "SELECT * FROM file WHERE ino = ?;";
+  const char *sql = "SELECT * FROM file WHERE ino = ? and deleted = 0;";
 
   if (!select) {
     rc = sqlite3_prepare_v2(mem_db, sql, strlen(sql), &select, NULL);
@@ -91,10 +91,29 @@ void queryFile(int sd, FILE_MSG *msg) {
   sqlite3_clear_bindings(select);
 }
 
+void removeFile(FILE_MSG *msg) {
+  int rc = 0;
+  static sqlite3_stmt *remove = NULL;
+  const char *sql = "UPDATE file SET deleted = 1 WHERE ino = ?";
+
+  if (!remove) {
+    rc = sqlite3_prepare_v2(mem_db, sql, strlen(sql), &remove, NULL);
+    if (rc) {
+      return; 
+    }
+  }
+
+  sqlite3_bind_int64(remove, 1, msg->ino);
+
+  sqlite3_step(remove);
+  sqlite3_reset(remove);
+  sqlite3_clear_bindings(remove);
+}
+
 void updateFile(FILE_MSG *msg) {
   int rc = 0;
   static sqlite3_stmt *update = NULL;
-  const char *sql = "UPDATE file SET dev = ?, path = ?, uid = ?, gid = ?, mode = ?, rdev = ?, nlink = ? WHERE ino = ?";
+  const char *sql = "UPDATE file SET dev = ?, path = ?, uid = ?, gid = ?, mode = ?, rdev = ?, nlink = ? WHERE ino = ? and deleted = 0";
 
   if (!update) {
     rc = sqlite3_prepare_v2(mem_db, sql, strlen(sql), &update, NULL);
@@ -171,6 +190,8 @@ int readMsg(int sd, FILE_MSG *msg) {
     queryFile(sd, msg);
   } else if (msg->type == FUNC_CHOWN || msg->type == FUNC_CHMOD) {
     updateFile(msg);
+  } else if (msg->type == FUNC_UNLINK) {
+    removeFile(msg);
   } else {
     insertFile(msg);
   }

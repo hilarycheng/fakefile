@@ -24,6 +24,8 @@
 volatile int fakesd = -1;
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
+typedef int (*__XSTAT)(int ver, const char *path, struct stat *buf);
+
 __attribute__((__constructor__,__used__)) static void lib_init();
 static void lib_init()
 {
@@ -117,7 +119,7 @@ int sendStat(struct stat *st, int func, const char *path, const char *link) {
       st->st_dev   = msg.dev;
       st->st_rdev  = msg.rdev;
       st->st_nlink = msg.nlink;
-      if (link != NULL) memcpy(link, msg.link, PATH_MAX);
+      if (link != NULL) memcpy((void *) link, msg.link, PATH_MAX);
       pthread_mutex_unlock(&mutex);
       return 0;
     }
@@ -146,7 +148,6 @@ char *get_current_dir_name(void)
   return dir_func();
 }
 
-typedef int (*__XSTAT)(int ver, const char *path, struct stat *buf);
 int __xstat(int ver, const char *path, struct stat *buf)
 {
   int r = 0;
@@ -368,6 +369,34 @@ int dup2(int oldfd, int newfd)
   return dup2_func(oldfd, newfd);
 }
 #endif
+
+typedef int (*RENAME)(const char *old, const char *new);
+int rename(const char *old, const char *new) {
+  return 0;
+}
+
+typedef int (*UNLINK)(const char *pathname);
+int unlink(const char *pathname)
+{
+  struct stat st; 
+  UNLINK unlink_func;
+  __XSTAT stat_func;
+  int r = 0;
+
+  stat_func = (__XSTAT) dlsym(RTLD_NEXT, "__xstat");
+  r = stat_func(0, pathname, &st);
+  if (r)
+    return -1;
+
+  unlink_func = (UNLINK) dlsym(RTLD_NEXT,"unlink");
+  r = unlink_func(pathname);
+  if (r)
+    return -1;
+
+  sendStat(&st, FUNC_UNLINK, pathname, NULL);
+
+  return 0;
+}
 
 typedef int (*LINK)(const char *path1, const char *path2);
 int link(const char *path1, const char *path2) {
